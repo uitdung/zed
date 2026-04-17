@@ -1,3 +1,4 @@
+mod context_compaction;
 mod db;
 mod edit_agent;
 mod legacy_thread;
@@ -11,6 +12,8 @@ mod thread;
 mod thread_store;
 mod tool_permissions;
 mod tools;
+
+pub use context_compaction::CompactionConfig;
 
 use context_server::ContextServerId;
 pub use db::*;
@@ -1877,6 +1880,7 @@ impl NativeThreadEnvironment {
     pub(crate) fn create_subagent_thread(
         &self,
         label: String,
+        capability: SubagentCapability,
         cx: &mut App,
     ) -> Result<Rc<dyn SubagentHandle>> {
         let Some(parent_thread_entity) = self.thread.upgrade() else {
@@ -1894,7 +1898,7 @@ impl NativeThreadEnvironment {
         }
 
         let subagent_thread: Entity<Thread> = cx.new(|cx| {
-            let mut thread = Thread::new_subagent(&parent_thread_entity, cx);
+            let mut thread = Thread::new_subagent(&parent_thread_entity, capability, cx);
             thread.set_title(label.into(), cx);
             thread
         });
@@ -2005,8 +2009,13 @@ impl ThreadEnvironment for NativeThreadEnvironment {
         })
     }
 
-    fn create_subagent(&self, label: String, cx: &mut App) -> Result<Rc<dyn SubagentHandle>> {
-        self.create_subagent_thread(label, cx)
+    fn create_subagent(
+        &self,
+        label: String,
+        capability: SubagentCapability,
+        cx: &mut App,
+    ) -> Result<Rc<dyn SubagentHandle>> {
+        self.create_subagent_thread(label, capability, cx)
     }
 
     fn resume_subagent(

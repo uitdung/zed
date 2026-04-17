@@ -6,9 +6,10 @@ use fs::Fs;
 use gpui::{
     DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, ScrollHandle, Task,
 };
-use language_model::LanguageModelRegistry;
+use language_model::{LanguageModelProviderId, LanguageModelRegistry};
 use language_models::provider::open_ai_compatible::{AvailableModel, ModelCapabilities};
-use settings::{OpenAiCompatibleSettingsContent, update_settings_file};
+use language_models::AllLanguageModelSettings;
+use settings::{OpenAiCompatibleSettingsContent, Settings, update_settings_file};
 use ui::{
     Banner, Checkbox, KeyBinding, Modal, ModalFooter, ModalHeader, Section, ToggleState,
     WithScrollbar, prelude::*,
@@ -56,6 +57,11 @@ impl LlmCompatibleProvider {
     }
 }
 
+enum Mode {
+    Add,
+    Edit { provider_id: Arc<str> },
+}
+
 struct AddLlmProviderInput {
     provider_name: Entity<InputField>,
     api_url: Entity<InputField>,
@@ -95,6 +101,55 @@ impl AddLlmProviderInput {
 
     fn remove_model(&mut self, index: usize) {
         self.models.remove(index);
+    }
+
+    fn new_for_edit(
+        provider_id: &str,
+        api_url: &str,
+        models: &[AvailableModel],
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let provider_name = single_line_input(
+            "Provider Name",
+            "e.g. my-openai-provider",
+            Some(provider_id),
+            1,
+            window,
+            cx,
+        );
+        let api_url_input = single_line_input(
+            "API URL",
+            "https://api.example.com/v1",
+            Some(api_url),
+            2,
+            window,
+            cx,
+        );
+        let api_key = cx.new(|cx| {
+            InputField::new(window, cx, "Leave blank to keep current key")
+                .label("API Key (optional)")
+                .tab_index(3)
+                .tab_stop(true)
+                .masked(true)
+        });
+
+        let model_inputs: Vec<ModelInput> = if models.is_empty() {
+            vec![ModelInput::new(0, window, cx)]
+        } else {
+            models
+                .iter()
+                .enumerate()
+                .map(|(i, model)| ModelInput::from_existing(i, model, window, cx))
+                .collect()
+        };
+
+        Self {
+            provider_name,
+            api_url: api_url_input,
+            api_key,
+            models: model_inputs,
+        }
     }
 }
 
@@ -175,6 +230,65 @@ impl ModelInput {
         }
     }
 
+    fn from_existing(
+        model_index: usize,
+        model: &AvailableModel,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let base_tab_index = (3 + (model_index * 4)) as isize;
+
+        let name = single_line_input(
+            "Model Name",
+            "e.g. gpt-5, claude-opus-4, gemini-2.5-pro",
+            Some(&model.name),
+            base_tab_index + 1,
+            window,
+            cx,
+        );
+        let max_completion_tokens_value = model.max_completion_tokens.map(|v| v.to_string());
+        let max_completion_tokens = single_line_input(
+            "Max Completion Tokens",
+            "200000",
+            max_completion_tokens_value.as_deref(),
+            base_tab_index + 2,
+            window,
+            cx,
+        );
+        let max_output_tokens_value = model.max_output_tokens.map(|v| v.to_string());
+        let max_output_tokens = single_line_input(
+            "Max Output Tokens",
+            "Max Output Tokens",
+            max_output_tokens_value.as_deref(),
+            base_tab_index + 3,
+            window,
+            cx,
+        );
+        let max_tokens_value = model.max_tokens.to_string();
+        let max_tokens = single_line_input(
+            "Max Tokens",
+            "Max Tokens",
+            Some(&max_tokens_value),
+            base_tab_index + 4,
+            window,
+            cx,
+        );
+
+        Self {
+            name,
+            max_completion_tokens,
+            max_output_tokens,
+            max_tokens,
+            capabilities: ModelCapabilityToggles {
+                supports_tools: model.capabilities.tools.into(),
+                supports_images: model.capabilities.images.into(),
+                supports_parallel_tool_calls: model.capabilities.parallel_tool_calls.into(),
+                supports_prompt_cache_key: model.capabilities.prompt_cache_key.into(),
+                supports_chat_completions: model.capabilities.chat_completions.into(),
+            },
+        }
+    }
+
     fn parse(&self, cx: &App) -> Result<AvailableModel, SharedString> {
         let name = self.name.read(cx).text(cx);
         if name.is_empty() {
@@ -218,24 +332,12 @@ impl ModelInput {
 
 fn save_provider_to_settings(
     input: &AddLlmProviderInput,
+    mode: &Mode,
     cx: &mut App,
 ) -> Task<Result<(), SharedString>> {
     let provider_name: Arc<str> = input.provider_name.read(cx).text(cx).into();
     if provider_name.is_empty() {
         return Task::ready(Err("Provider Name cannot be empty".into()));
-    }
-
-    if LanguageModelRegistry::read_global(cx)
-        .providers()
-        .iter()
-        .any(|provider| {
-            provider.id().0.as_ref() == provider_name.as_ref()
-                || provider.name().0.as_ref() == provider_name.as_ref()
-        })
-    {
-        return Task::ready(Err(
-            "Provider Name is already taken by another provider".into()
-        ));
     }
 
     let api_url = input.api_url.read(cx).text(cx);
@@ -244,7 +346,7 @@ fn save_provider_to_settings(
     }
 
     let api_key = input.api_key.read(cx).text(cx);
-    if api_key.is_empty() {
+    if matches!(mode, Mode::Add) && api_key.is_empty() {
         return Task::ready(Err("API Key cannot be empty".into()));
     }
 
@@ -263,6 +365,42 @@ fn save_provider_to_settings(
     }
 
     let fs = <dyn Fs>::global(cx);
+
+    match mode {
+        Mode::Add => save_new_provider(provider_name, api_url, api_key, models, fs, cx),
+        Mode::Edit { provider_id } => update_existing_provider(
+            provider_id.clone(),
+            provider_name,
+            api_url,
+            api_key,
+            models,
+            fs,
+            cx,
+        ),
+    }
+}
+
+fn save_new_provider(
+    provider_name: Arc<str>,
+    api_url: String,
+    api_key: String,
+    models: Vec<AvailableModel>,
+    fs: Arc<dyn Fs>,
+    cx: &mut App,
+) -> Task<Result<(), SharedString>> {
+    if LanguageModelRegistry::read_global(cx)
+        .providers()
+        .iter()
+        .any(|provider| {
+            provider.id().0.as_ref() == provider_name.as_ref()
+                || provider.name().0.as_ref() == provider_name.as_ref()
+        })
+    {
+        return Task::ready(Err(
+            "Provider Name is already taken by another provider".into()
+        ));
+    }
+
     let task = cx.write_credentials(&api_url, "Bearer", api_key.as_bytes());
     cx.spawn(async move |cx| {
         task.await
@@ -287,7 +425,92 @@ fn save_provider_to_settings(
     })
 }
 
+fn update_existing_provider(
+    provider_id: Arc<str>,
+    provider_name: Arc<str>,
+    api_url: String,
+    api_key: String,
+    models: Vec<AvailableModel>,
+    fs: Arc<dyn Fs>,
+    cx: &mut App,
+) -> Task<Result<(), SharedString>> {
+    let name_conflict = LanguageModelRegistry::read_global(cx)
+        .providers()
+        .iter()
+        .any(|provider| {
+            provider.id().0.as_ref() == provider_name.as_ref()
+                || provider.name().0.as_ref() == provider_name.as_ref()
+        });
+
+    if name_conflict {
+        let is_same_provider = provider_name.as_ref() == provider_id.as_ref();
+        if !is_same_provider {
+            return Task::ready(Err(
+                "Provider Name is already taken by another provider".into()
+            ));
+        }
+    }
+
+    let old_api_url = AllLanguageModelSettings::get_global(cx)
+        .openai_compatible
+        .get(&*provider_id)
+        .map(|s| s.api_url.clone());
+    let write_credentials_task = if api_key.is_empty() {
+        None
+    } else {
+        Some(cx.write_credentials(&api_url, "Bearer", api_key.as_bytes()))
+    };
+    cx.spawn(async move |cx| {
+        if let Some(ref old_url) = old_api_url {
+            if old_url != &api_url {
+                let delete_task = cx.update(|cx| cx.delete_credentials(old_url));
+                if let Err(err) = delete_task.await {
+                    log::warn!("Failed to delete old credentials: {err:#}");
+                }
+            }
+        }
+        if let Some(task) = write_credentials_task {
+            task.await
+                .map_err(|_| SharedString::from("Failed to write API key to keychain"))?;
+        }
+        let provider_name_for_registry = provider_name.clone();
+        cx.update(|cx| {
+            let provider_id = provider_id.clone();
+            update_settings_file(fs, cx, move |settings, _cx| {
+                let map = settings
+                    .language_models
+                    .get_or_insert_default()
+                    .openai_compatible
+                    .get_or_insert_default();
+                if provider_name.as_ref() != provider_id.as_ref() {
+                    map.remove(&provider_id);
+                }
+                map.insert(
+                    provider_name,
+                    OpenAiCompatibleSettingsContent {
+                        api_url,
+                        available_models: models,
+                    },
+                );
+            });
+        });
+        cx.update(|cx| {
+            let provider_id = provider_id.clone();
+            LanguageModelRegistry::global(cx).update(cx, move |registry, cx| {
+                if provider_name_for_registry.as_ref() != provider_id.as_ref() {
+                    registry.unregister_provider(
+                        LanguageModelProviderId(SharedString::new(provider_id)),
+                        cx,
+                    );
+                }
+            });
+        });
+        Ok(())
+    })
+}
+
 pub struct AddLlmProviderModal {
+    mode: Mode,
     provider: LlmCompatibleProvider,
     input: AddLlmProviderInput,
     scroll_handle: ScrollHandle,
@@ -302,12 +525,58 @@ impl AddLlmProviderModal {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        workspace.toggle_modal(window, cx, |window, cx| Self::new(provider, window, cx));
+        workspace.toggle_modal(window, cx, |window, cx| {
+            Self::new(provider, Mode::Add, window, cx)
+        });
     }
 
-    fn new(provider: LlmCompatibleProvider, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn toggle_edit(
+        provider_id: Arc<str>,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        workspace.toggle_modal(window, cx, |window, cx| {
+            Self::new(
+                LlmCompatibleProvider::OpenAi,
+                Mode::Edit { provider_id },
+                window,
+                cx,
+            )
+        });
+    }
+
+    fn new(
+        provider: LlmCompatibleProvider,
+        mode: Mode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (input, mode) = match mode {
+            Mode::Add => (AddLlmProviderInput::new(provider, window, cx), Mode::Add),
+            Mode::Edit { provider_id } => {
+                let provider_settings = AllLanguageModelSettings::get_global(cx)
+                    .openai_compatible
+                    .get(&provider_id)
+                    .map(|settings| (settings.api_url.clone(), settings.available_models.clone()));
+                match provider_settings {
+                    Some((api_url, available_models)) => (
+                        AddLlmProviderInput::new_for_edit(
+                            &provider_id,
+                            &api_url,
+                            &available_models,
+                            window,
+                            cx,
+                        ),
+                        Mode::Edit { provider_id },
+                    ),
+                    None => (AddLlmProviderInput::new(provider, window, cx), Mode::Add),
+                }
+            }
+        };
         Self {
-            input: AddLlmProviderInput::new(provider, window, cx),
+            input,
+            mode,
             provider,
             last_error: None,
             focus_handle: cx.focus_handle(),
@@ -316,7 +585,7 @@ impl AddLlmProviderModal {
     }
 
     fn confirm(&mut self, _: &menu::Confirm, _: &mut Window, cx: &mut Context<Self>) {
-        let task = save_provider_to_settings(&self.input, cx);
+        let task = save_provider_to_settings(&self.input, &self.mode, cx);
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| match result {
@@ -520,13 +789,18 @@ impl Render for AddLlmProviderModal {
             }))
             .child(
                 Modal::new("configure-context-server", None)
-                    .header(ModalHeader::new().headline("Add LLM Provider").description(
-                        match self.provider {
-                            LlmCompatibleProvider::OpenAi => {
-                                "This provider will use an OpenAI compatible API."
-                            }
-                        },
-                    ))
+                    .header(ModalHeader::new()
+                        .headline(match &self.mode {
+                            Mode::Add => "Add LLM Provider",
+                            Mode::Edit { .. } => "Edit LLM Provider",
+                        })
+                        .description(
+                            match self.provider {
+                                LlmCompatibleProvider::OpenAi => {
+                                    "This provider will use an OpenAI compatible API."
+                                }
+                            },
+                        ))
                     .when_some(self.last_error.clone(), |this, error| {
                         this.section(
                             Section::new().child(
@@ -868,7 +1142,7 @@ mod tests {
                 );
                 set_text(&model.max_output_tokens, max_output_tokens, window, cx);
             }
-            save_provider_to_settings(&input, cx)
+            save_provider_to_settings(&input, &Mode::Add, cx)
         });
 
         task.await.err()

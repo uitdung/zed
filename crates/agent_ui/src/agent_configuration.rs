@@ -358,6 +358,12 @@ impl AgentConfiguration {
                         is_expanded && is_removable_provider(&provider.id(), cx),
                         |this| {
                             this.child(
+                                self.render_edit_provider_button(
+                                    &provider.id().0,
+                                    cx,
+                                ),
+                            )
+                            .child(
                                 Button::new(
                                     SharedString::from(format!("delete-provider-{provider_id}")),
                                     "Remove Provider",
@@ -380,6 +386,39 @@ impl AgentConfiguration {
                         },
                     ),
             )
+    }
+
+    fn render_edit_provider_button(
+        &self,
+        provider_id: &SharedString,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        Button::new(
+            SharedString::from(format!("edit-provider-{provider_id}")),
+            "Edit Provider",
+        )
+        .full_width()
+        .style(ButtonStyle::Outlined)
+        .start_icon(
+            Icon::new(IconName::Pencil)
+                .size(IconSize::Small)
+                .color(Color::Muted),
+        )
+        .label_size(LabelSize::Small)
+        .on_click(cx.listener({
+            let workspace = self.workspace.clone();
+            let provider_id = provider_id.clone();
+            move |_this, _event, window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    AddLlmProviderModal::toggle_edit(
+                        provider_id.clone().into(),
+                        workspace,
+                        window,
+                        cx,
+                    );
+                }).log_err();
+            }
+        }))
     }
 
     fn delete_provider(

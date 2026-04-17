@@ -25,6 +25,13 @@ pub const SUMMARIZE_THREAD_PROMPT: &str = include_str!("prompts/summarize_thread
 pub const SUMMARIZE_THREAD_DETAILED_PROMPT: &str =
     include_str!("prompts/summarize_thread_detailed_prompt.txt");
 
+#[derive(Debug, Clone, Default)]
+pub struct SubagentModels {
+    pub fast: Option<LanguageModelSelection>,
+    pub standard: Option<LanguageModelSelection>,
+    pub powerful: Option<LanguageModelSelection>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PanelLayout {
     pub(crate) agent_dock: Option<DockPosition>,
@@ -168,6 +175,8 @@ pub struct AgentSettings {
     pub show_merge_conflict_indicator: bool,
     pub tool_permissions: ToolPermissions,
     pub new_thread_location: NewThreadLocation,
+    pub compaction: Option<settings::CompactionSettingsContent>,
+    pub subagent_models: SubagentModels,
 }
 
 impl AgentSettings {
@@ -672,6 +681,15 @@ impl Settings for AgentSettings {
             show_merge_conflict_indicator: agent.show_merge_conflict_indicator.unwrap(),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
             new_thread_location: agent.new_thread_location.unwrap_or_default(),
+            compaction: agent.compaction,
+            subagent_models: agent
+                .subagent_models
+                .map(|s| SubagentModels {
+                    fast: s.fast,
+                    standard: s.standard,
+                    powerful: s.powerful,
+                })
+                .unwrap_or_default(),
         }
     }
 }

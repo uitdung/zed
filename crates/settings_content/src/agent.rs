@@ -237,6 +237,10 @@ pub struct AgentSettingsContent {
     /// `always_confirm`) match against the tool's text input (command, path,
     /// URL, etc.).
     pub tool_permissions: Option<ToolPermissionsContent>,
+    /// Configurable thresholds for context compaction behavior.
+    pub compaction: Option<CompactionSettingsContent>,
+    /// Model selections for subagents based on capability level.
+    pub subagent_models: Option<SubagentModelsContent>,
 }
 
 impl AgentSettingsContent {
@@ -632,6 +636,40 @@ pub enum CustomAgentServerSettings {
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         favorite_config_option_values: HashMap<String, Vec<String>>,
     },
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct CompactionSettingsContent {
+    /// Whether auto-compaction is enabled.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// Approximate tokens from end beyond which deep omit occurs (Tier 1: tool result stripping).
+    ///
+    /// Default: 80000
+    pub deep_omit_threshold_tokens: Option<u64>,
+    /// Approximate tokens from end beyond which auto compact triggers (Tier 2: message summarization).
+    /// Content before this boundary is eligible for summarization.
+    ///
+    /// Default: 80000
+    pub summary_threshold_tokens: Option<u64>,
+    /// Minimum formatted content length (chars) to trigger auto compact.
+    /// Content below this threshold is considered too small to warrant a summary.
+    ///
+    /// Default: 60000
+    pub min_content_chars: Option<usize>,
+}
+
+/// Model selections for subagents based on capability level.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct SubagentModelsContent {
+    /// Model for simple tasks (search, formatting, single edits).
+    pub fast: Option<LanguageModelSelection>,
+    /// Model for most tasks (default).
+    pub standard: Option<LanguageModelSelection>,
+    /// Model for complex tasks (architecture, deep analysis).
+    pub powerful: Option<LanguageModelSelection>,
 }
 
 #[with_fallible_options]

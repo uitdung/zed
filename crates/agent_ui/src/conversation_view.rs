@@ -101,7 +101,11 @@ use crate::{
 const STOPWATCH_THRESHOLD: Duration = Duration::from_secs(30);
 const TOKEN_THRESHOLD: u64 = 250;
 
+mod compaction_settings_modal;
+mod compact_messages_modal;
 mod thread_view;
+pub use compaction_settings_modal::*;
+pub use compact_messages_modal::*;
 pub use thread_view::*;
 
 pub struct QueuedMessage {

@@ -1,3 +1,7 @@
+use crate::context_compaction::{
+    apply_message_compaction, compact_old_tool_results, format_request_message_as_markdown,
+    prepare_message_compaction, stream_compaction_summary, CHARS_PER_TOKEN,
+};
 use crate::{
     ContextServerRegistry, CopyPathTool, CreateDirectoryTool, DbLanguageModel, DbThread,
     DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool, FindPathTool, GrepTool,
@@ -63,6 +67,19 @@ use uuid::Uuid;
 const TOOL_CANCELED_MESSAGE: &str = "Tool canceled by user";
 pub const MAX_TOOL_NAME_LENGTH: usize = 64;
 pub const MAX_SUBAGENT_DEPTH: u8 = 1;
+
+/// Capability level for a subagent, used to select an appropriate model.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentCapability {
+    /// Quick, cheap model for simple tasks (search, formatting, single edits)
+    Fast,
+    /// Balanced model for most tasks (default)
+    #[default]
+    Standard,
+    /// Powerful model for complex tasks (architecture, deep analysis)
+    Powerful,
+}
 
 /// Returned when a turn is attempted but no language model has been selected.
 #[derive(Debug)]
@@ -652,7 +669,12 @@ pub trait ThreadEnvironment {
         cx: &mut AsyncApp,
     ) -> Task<Result<Rc<dyn TerminalHandle>>>;
 
-    fn create_subagent(&self, label: String, cx: &mut App) -> Result<Rc<dyn SubagentHandle>>;
+    fn create_subagent(
+        &self,
+        label: String,
+        capability: SubagentCapability,
+        cx: &mut App,
+    ) -> Result<Rc<dyn SubagentHandle>>;
 
     fn resume_subagent(
         &self,
@@ -663,6 +685,14 @@ pub trait ThreadEnvironment {
             "Resuming subagent sessions is not supported"
         ))
     }
+}
+
+/// Summary of a message for display in the compact UI.
+#[derive(Debug, Clone)]
+pub struct MessageSummary {
+    pub index: usize,
+    pub is_user: bool,
+    pub preview: String,
 }
 
 #[derive(Debug)]
@@ -966,6 +996,8 @@ pub struct Thread {
     pub(crate) templates: Arc<Templates>,
     model: Option<Arc<dyn LanguageModel>>,
     summarization_model: Option<Arc<dyn LanguageModel>>,
+    auto_compact_enabled: bool,
+    compaction_config: crate::context_compaction::CompactionConfig,
     thinking_enabled: bool,
     thinking_effort: Option<String>,
     speed: Option<Speed>,
@@ -992,13 +1024,23 @@ impl Thread {
             .embedded_context(true)
     }
 
-    pub fn new_subagent(parent_thread: &Entity<Thread>, cx: &mut Context<Self>) -> Self {
-        let project = parent_thread.read(cx).project.clone();
-        let project_context = parent_thread.read(cx).project_context.clone();
-        let context_server_registry = parent_thread.read(cx).context_server_registry.clone();
-        let templates = parent_thread.read(cx).templates.clone();
-        let model = parent_thread.read(cx).model().cloned();
-        let parent_action_log = parent_thread.read(cx).action_log().clone();
+    pub fn new_subagent(
+        parent_thread: &Entity<Thread>,
+        capability: SubagentCapability,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (project, project_context, context_server_registry, templates, parent_model, parent_action_log) = {
+            let parent = parent_thread.read(cx);
+            (
+                parent.project.clone(),
+                parent.project_context.clone(),
+                parent.context_server_registry.clone(),
+                parent.templates.clone(),
+                parent.model().cloned(),
+                parent.action_log().clone(),
+            )
+        };
+        let model = Self::resolve_subagent_model(&capability, cx).or(parent_model);
         let action_log =
             cx.new(|_cx| ActionLog::new(project.clone()).with_linked_action_log(parent_action_log));
         let mut thread = Self::new_internal(
@@ -1091,6 +1133,8 @@ impl Thread {
             templates,
             model,
             summarization_model: None,
+            auto_compact_enabled: AgentSettings::get_global(cx).compaction.as_ref().and_then(|c| c.enabled).unwrap_or(true),
+            compaction_config: crate::context_compaction::CompactionConfig::from_settings(cx),
             thinking_enabled: enable_thinking,
             speed,
             thinking_effort,
@@ -1116,7 +1160,26 @@ impl Thread {
         self.thinking_enabled = parent.thinking_enabled;
         self.thinking_effort = parent.thinking_effort.clone();
         self.summarization_model = parent.summarization_model.clone();
+        self.auto_compact_enabled = parent.auto_compact_enabled;
+        self.compaction_config = parent.compaction_config.clone();
         self.profile_id = parent.profile_id.clone();
+    }
+
+    fn resolve_subagent_model(
+        capability: &SubagentCapability,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<dyn LanguageModel>> {
+        use agent_settings::AgentSettings;
+
+        let selection = {
+            let settings = AgentSettings::get_global(cx);
+            match capability {
+                SubagentCapability::Fast => settings.subagent_models.fast.clone(),
+                SubagentCapability::Standard => settings.subagent_models.standard.clone(),
+                SubagentCapability::Powerful => settings.subagent_models.powerful.clone(),
+            }
+        };
+        selection.and_then(|selection| Self::resolve_model_from_selection(&selection, cx))
     }
 
     pub fn id(&self) -> &acp::SessionId {
@@ -1320,6 +1383,8 @@ impl Thread {
             templates,
             model,
             summarization_model: None,
+            auto_compact_enabled: AgentSettings::get_global(cx).compaction.as_ref().and_then(|c| c.enabled).unwrap_or(true),
+            compaction_config: crate::context_compaction::CompactionConfig::from_settings(cx),
             thinking_enabled: db_thread.thinking_enabled,
             thinking_effort: db_thread.thinking_effort,
             speed: db_thread.speed,
@@ -1902,12 +1967,83 @@ impl Thread {
         Ok(events_rx)
     }
 
+    async fn compact_old_messages(
+        this: &WeakEntity<Self>,
+        cancellation_rx: &mut watch::Receiver<bool>,
+        cx: &mut AsyncApp,
+        turn_start_index: Option<usize>,
+    ) -> Result<()> {
+        let plan = this.update(cx, |this, _cx| {
+            let model = this.summarization_model.clone().or(this.model.clone());
+            prepare_message_compaction(&this.messages, model, &this.compaction_config, turn_start_index)
+        })??;
+
+        let Some(plan) = plan else {
+            return Ok(());
+        };
+
+        log::info!("compact: calling summarization model...");
+
+        let input_text = plan.request.messages.first()
+            .map(|m| m.string_contents())
+            .unwrap_or_default();
+        let input_preview_len = 500;
+        if input_text.len() > input_preview_len * 2 {
+            let mut end = input_preview_len;
+            while end > 0 && !input_text.is_char_boundary(end) { end -= 1; }
+            let mut start = input_text.len() - input_preview_len;
+            while start < input_text.len() && !input_text.is_char_boundary(start) { start += 1; }
+            log::debug!("compact: input preview (first+last {} chars):\n{}...[TRUNCATED]...\n{}", input_preview_len, &input_text[..end], &input_text[start..]);
+        } else {
+            log::debug!("compact: input:\n{}", input_text);
+        }
+
+        let boundary_index = plan.boundary_index;
+        let summary_text = stream_compaction_summary(
+            plan.model,
+            plan.request,
+            Some(cancellation_rx),
+            cx,
+        )
+        .await?;
+
+        log::info!("compact: summary_len={} chars", summary_text.len());
+        log::debug!("compact: summary text:\n{}", summary_text);
+
+        if summary_text.len() < 500 {
+            log::info!("compact: insufficient summary, skipping");
+            return Ok(());
+        }
+
+        log::info!("compact: replacing messages [0..{}) with summary", boundary_index);
+
+        this.update(cx, |this, cx| {
+            apply_message_compaction(
+                &mut this.messages,
+                &mut this.request_token_usage,
+                boundary_index,
+                summary_text,
+            );
+            cx.notify();
+        })?;
+
+        Ok(())
+    }
+
     async fn run_turn_internal(
         this: &WeakEntity<Self>,
         event_stream: &ThreadEventStream,
         mut cancellation_rx: watch::Receiver<bool>,
         cx: &mut AsyncApp,
     ) -> Result<()> {
+        let auto_compact = this.read_with(cx, |this, _| this.auto_compact_enabled).unwrap_or(true);
+        if auto_compact {
+            if let Err(err) = Self::compact_old_messages(this, &mut cancellation_rx, cx, None).await {
+                log::warn!("Failed to compact old messages: {err}");
+            }
+        }
+
+        let mut turn_start_index = this.read_with(cx, |this, _| this.messages.len()).unwrap_or(0);
         let mut attempt = 0;
         let mut intent = CompletionIntent::UserPrompt;
         loop {
@@ -2108,7 +2244,31 @@ impl Thread {
                 }
                 intent = CompletionIntent::ToolResults;
                 attempt = 0;
+
+                turn_start_index = Self::compact_mid_turn(this, &mut cancellation_rx, cx, auto_compact, turn_start_index).await;
             }
+        }
+    }
+
+    async fn compact_mid_turn(
+        this: &WeakEntity<Self>,
+        cancellation_rx: &mut watch::Receiver<bool>,
+        cx: &mut AsyncApp,
+        auto_compact: bool,
+        turn_start_index: usize,
+    ) -> usize {
+        if !auto_compact {
+            return turn_start_index;
+        }
+        let pre_compact_len = this.read_with(cx, |this, _| this.messages.len()).unwrap_or(0);
+        if let Err(err) = Self::compact_old_messages(this, cancellation_rx, cx, Some(turn_start_index)).await {
+            log::warn!("Failed to compact old messages mid-turn: {err}");
+        }
+        let post_compact_len = this.read_with(cx, |this, _| this.messages.len()).unwrap_or(0);
+        if post_compact_len != pre_compact_len {
+            turn_start_index.saturating_sub(pre_compact_len - post_compact_len)
+        } else {
+            turn_start_index
         }
     }
 
@@ -3006,6 +3166,11 @@ impl Thread {
         self.running_turn.is_none()
     }
 
+    fn apply_tool_result_compaction(&self, messages: &mut Vec<LanguageModelRequestMessage>) {
+        let deep_omit_threshold_chars = (self.compaction_config.deep_omit_threshold_tokens as usize) * CHARS_PER_TOKEN;
+        compact_old_tool_results(messages, deep_omit_threshold_chars);
+    }
+
     fn build_request_messages(
         &self,
         available_tools: Vec<SharedString>,
@@ -3033,6 +3198,8 @@ impl Thread {
         for message in &self.messages {
             messages.extend(message.to_request());
         }
+
+        self.apply_tool_result_compaction(&mut messages);
 
         if let Some(last_message) = messages.last_mut() {
             last_message.cache = true;
@@ -3062,6 +3229,32 @@ impl Thread {
         if let Some(message) = self.pending_message.as_ref() {
             markdown.push_str("\n## Assistant\n\n");
             markdown.push_str(&message.to_markdown());
+        }
+
+        markdown
+    }
+
+    pub fn to_llm_context_markdown(&self, cx: &App) -> String {
+        let mut markdown = String::new();
+
+        if let Some(model) = self.model.as_ref() {
+            markdown.push_str(&format!("# LLM Context — {}\n\n", model.name().0));
+            markdown.push_str(&format!("- Max tokens: {}\n", model.max_token_count()));
+            markdown.push('\n');
+        } else {
+            markdown.push_str("# LLM Context\n\n");
+        }
+
+        let available_tools: Vec<SharedString> = self
+            .running_turn
+            .as_ref()
+            .map(|turn| turn.tools.keys().cloned().collect())
+            .unwrap_or_default();
+
+        let messages = self.build_request_messages(available_tools, cx);
+
+        for msg in &messages {
+            markdown.push_str(&format_request_message_as_markdown(msg));
         }
 
         markdown
@@ -3173,6 +3366,121 @@ impl Thread {
                 max_attempts: 2,
             }),
         }
+    }
+
+    /// Returns summaries of all messages for the compact UI.
+    /// Excludes the last 2 messages (typically the most recent exchange) to prevent
+    /// compacting the active conversation.
+    pub fn message_summaries_for_compaction(&self) -> Vec<MessageSummary> {
+        let keep = self.messages.len().saturating_sub(2).max(0);
+        self.messages[..keep].iter().enumerate().map(|(i, msg)| {
+            let preview = match msg {
+                Message::User(user_msg) => {
+                    user_msg.content.iter()
+                        .filter_map(|c| match c {
+                            UserMessageContent::Text(t) => Some(t.as_str()),
+                            _ => None,
+                        })
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(100)
+                        .collect()
+                }
+                Message::Agent(agent_msg) => {
+                    agent_msg.content.iter()
+                        .filter_map(|c| match c {
+                            AgentMessageContent::Text(t) => Some(t.as_str()),
+                            _ => None,
+                        })
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(100)
+                        .collect()
+                }
+                Message::Resume => "[Resume]".to_string(),
+            };
+            MessageSummary {
+                index: i,
+                is_user: matches!(msg, Message::User(_)),
+                preview,
+            }
+        }).collect()
+    }
+
+    pub fn auto_compact_enabled(&self) -> bool {
+        self.auto_compact_enabled
+    }
+
+    pub fn set_auto_compact_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.auto_compact_enabled = enabled;
+        cx.notify();
+    }
+
+    pub fn compaction_config(&self) -> &crate::context_compaction::CompactionConfig {
+        &self.compaction_config
+    }
+
+    pub fn compaction_debug_info(&self) -> crate::context_compaction::CompactionDebugInfo {
+        crate::context_compaction::compute_compaction_debug_info(
+            &self.messages,
+            &self.compaction_config,
+            self.auto_compact_enabled,
+        )
+    }
+
+    pub fn set_compaction_config(
+        &mut self,
+        config: crate::context_compaction::CompactionConfig,
+        cx: &mut Context<Self>,
+    ) {
+        self.compaction_config = config;
+        cx.notify();
+    }
+
+    /// Returns the number of messages that can be compacted (all except last 2).
+    pub fn compactable_message_count(&self) -> usize {
+        self.messages.len().saturating_sub(2)
+    }
+
+    /// Prepare a compaction request for messages [0..boundary).
+    /// Returns the model and request needed to call the LLM.
+    pub fn prepare_manual_compaction(
+        &self,
+        boundary: usize,
+    ) -> Result<Option<(Arc<dyn LanguageModel>, LanguageModelRequest)>> {
+        let Some(model) = self.summarization_model.clone().or(self.model.clone()) else {
+            return Ok(None);
+        };
+
+        if boundary == 0 || boundary >= self.messages.len() {
+            return Ok(None);
+        }
+
+        let plan = crate::context_compaction::prepare_manual_compaction(
+            &self.messages,
+            0..boundary,
+            model,
+        )?;
+
+        Ok(Some((plan.model, plan.request)))
+    }
+
+    /// Apply manual compaction: replace messages [0..boundary) with summary.
+    pub fn apply_manual_compaction(
+        &mut self,
+        boundary: usize,
+        summary_text: String,
+        cx: &mut Context<Self>,
+    ) {
+        crate::context_compaction::apply_message_compaction(
+            &mut self.messages,
+            &mut self.request_token_usage,
+            boundary,
+            summary_text,
+        );
+        cx.notify();
     }
 }
 
@@ -4322,7 +4630,7 @@ mod tests {
         cx.update(|cx| {
             let mut subagents = Vec::new();
             for _ in 0..count {
-                let subagent = cx.new(|cx| Thread::new_subagent(parent, cx));
+                let subagent = cx.new(|cx| Thread::new_subagent(parent, SubagentCapability::Standard, cx));
                 parent.update(cx, |thread, _cx| {
                     thread.register_running_subagent(subagent.downgrade());
                 });
@@ -4593,4 +4901,5 @@ mod tests {
             assert!(last_message.tool_results.contains_key(&tool_use_id));
         })
     }
+
 }

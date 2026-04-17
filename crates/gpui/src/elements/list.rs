@@ -498,6 +498,9 @@ impl ListState {
     /// anchor, so the list's layout pass will walk backwards from the end and
     /// always show the bottom of the last item — even when that item is still
     /// growing (e.g. during streaming).
+    ///
+    /// This does NOT change the follow mode. Use [`set_follow_mode`] to
+    /// enable persistent tail-following behavior.
     pub fn scroll_to_end(&self) {
         let state = &mut *self.0.borrow_mut();
         let item_count = state.items.summary().count;

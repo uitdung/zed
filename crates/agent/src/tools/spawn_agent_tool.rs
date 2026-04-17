@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, SubagentCapability, ThreadEnvironment, ToolCallEventStream, ToolInput};
 
 /// Spawn a sub-agent for a well-scoped task.
 ///
@@ -44,6 +44,13 @@ pub struct SpawnAgentToolInput {
     /// Session ID of an existing agent session to continue instead of creating a new one.
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
+    /// Capability level for the subagent. Choose based on task complexity:
+    /// - "fast" for simple lookups, formatting, single-file edits
+    /// - "standard" for normal code changes, tool calls, file reads
+    /// - "powerful" for complex refactoring, architectural decisions, multi-file analysis
+    /// Default: "standard"
+    #[serde(default)]
+    pub capability: SubagentCapability,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,7 +152,8 @@ impl AgentTool for SpawnAgentTool {
                 let subagent = if let Some(session_id) = input.session_id {
                     self.environment.resume_subagent(session_id, cx)
                 } else {
-                    self.environment.create_subagent(input.label, cx)
+                    self.environment
+                        .create_subagent(input.label, input.capability.clone(), cx)
                 };
                 let subagent = subagent.map_err(|err| SpawnAgentToolOutput::Error {
                     session_id: None,

@@ -3279,6 +3279,7 @@ impl ThreadView {
                                     .flex_wrap()
                                     .gap_1()
                                     .children(self.render_token_usage(cx))
+                                    .children(self.render_compaction_debug(cx))
                                     .children(self.profile_selector.clone())
                                     .map(|this| match self.config_options_view.clone() {
                                         Some(config_view) => this.child(config_view),
@@ -3672,6 +3673,110 @@ impl ThreadView {
                     .into_any_element(),
             )
         }
+    }
+
+    fn render_compaction_debug(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let native_thread = self.as_native_thread(cx)?;
+        let debug_info = native_thread.read(cx).compaction_debug_info();
+
+        if !debug_info.auto_compact_enabled {
+            return None;
+        }
+
+        let ratio = if debug_info.min_content_chars > 0 {
+            debug_info.compactable_chars as f32 / debug_info.min_content_chars as f32
+        } else {
+            0.0
+        };
+
+        let progress_color = if ratio >= 1.0 {
+            cx.theme().status().error
+        } else if ratio >= 0.75 {
+            cx.theme().status().warning
+        } else {
+            cx.theme().colors().text_muted
+        };
+
+        let compactable_tokens = (debug_info.compactable_chars / 4) as u64;
+        let threshold_tokens = (debug_info.min_content_chars / 4) as u64;
+        let summary_threshold_tokens = (debug_info.summary_threshold_chars / 4) as u64;
+        let original_tokens = (debug_info.total_original_chars / 4) as u64;
+        let visible_tokens = (debug_info.total_visible_chars / 4) as u64;
+        let stripped_tokens = (debug_info.stripped_chars / 4) as u64;
+        let recent_tokens = (debug_info.recent_chars / 4) as u64;
+
+        let label = format!(
+            "{}/{}",
+            crate::humanize_token_count(compactable_tokens),
+            crate::humanize_token_count(threshold_tokens),
+        );
+
+        let tooltip_text = format!(
+            "Compaction Debug\n\
+            \n\
+            [TIMELINE: Old → New]\n\
+            [Tier 1: Tool Strip]\n\
+            All (before strip): ~{} tokens ({} chars)\n\
+            All (after strip / LLM-visible): ~{} tokens ({} chars)\n            Removed by strip: ~{} tokens ({} chars)\n\
+            Formula: after_strip = before_strip - removed_by_strip\n\
+            \n\
+            [Tier 2: Summary]\n\
+            Old (eligible to summarize): ~{} tokens ({} chars)\n\
+            New (protected / kept): ~{} tokens ({} chars)\n\
+            Summary boundary (from new end): ~{} tokens from end ({} chars)\n\
+            Min old required to summarize: ~{} tokens ({} chars)\n\
+            Check: after_strip = old + new\n\
+            Trigger rule: will_compact = auto_compact && old >= min_old_required\n\
+            \n\
+            Messages: {} ({} request msgs)\n            Will compact: {}",
+            /* Tier 1 values (tokens humanized, then raw chars) */
+            crate::humanize_token_count(original_tokens),
+            debug_info.total_original_chars,
+            crate::humanize_token_count(visible_tokens),
+            debug_info.total_visible_chars,
+            crate::humanize_token_count(stripped_tokens),
+            debug_info.stripped_chars,
+            /* Tier 2 values */
+            crate::humanize_token_count(compactable_tokens),
+            debug_info.compactable_chars,
+            crate::humanize_token_count(recent_tokens),
+            debug_info.recent_chars,
+            crate::humanize_token_count(summary_threshold_tokens),
+            debug_info.summary_threshold_chars,
+            crate::humanize_token_count(threshold_tokens),
+            debug_info.min_content_chars,
+            /* messages / decision */
+            debug_info.message_count,
+            debug_info.request_message_count,
+            debug_info.would_compact,
+        );
+
+        let ring_size = px(16.0);
+        let stroke_width = px(2.);
+
+        Some(
+            h_flex()
+                .id("compaction_debug")
+                .flex_shrink_0()
+                .gap_0p5()
+                .child(
+                    CircularProgress::new(
+                        debug_info.compactable_chars as f32,
+                        debug_info.min_content_chars as f32,
+                        ring_size,
+                        cx,
+                    )
+                    .stroke_width(stroke_width)
+                    .progress_color(progress_color),
+                )
+                .child(
+                    Label::new(label)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .hoverable_tooltip(Tooltip::text(tooltip_text))
+                .into_any_element(),
+        )
     }
 
     fn fast_mode_available(&self, cx: &Context<Self>) -> bool {
@@ -4903,6 +5008,83 @@ impl ThreadView {
             )
     }
 
+    fn render_compact_controls(
+        &self,
+        cx: &Context<Self>,
+    ) -> Option<(IconButton, IconButton)> {
+        let native_thread = self.as_native_thread(cx)?;
+
+        let compact_button = IconButton::new("compact-messages", IconName::Archive)
+            .shape(ui::IconButtonShape::Square)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Ignored)
+            .tooltip(Tooltip::text("Compact Old Messages"))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let Some(workspace) = this.workspace.upgrade() else {
+                    return;
+                };
+                let Some(native_thread) = this.as_native_thread(cx) else {
+                    return;
+                };
+                workspace.update(cx, |workspace, cx| {
+                    CompactMessagesModal::toggle(native_thread, workspace, window, cx);
+                });
+            }));
+
+        let enabled = native_thread.read(cx).auto_compact_enabled();
+        let auto_compact_toggle = IconButton::new(
+            "auto-compact-toggle",
+            if enabled {
+                IconName::BoltFilled
+            } else {
+                IconName::BoltOutlined
+            },
+        )
+        .shape(ui::IconButtonShape::Square)
+        .icon_size(IconSize::Small)
+        .icon_color(if enabled { Color::Accent } else { Color::Ignored })
+        .tooltip(Tooltip::text(if enabled {
+            "Auto Compact: ON — click to configure"
+        } else {
+            "Auto Compact: OFF — click to configure"
+        }))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            let Some(native_thread) = this.as_native_thread(cx) else {
+                return;
+            };
+            let Some(workspace) = this.workspace.upgrade() else {
+                return;
+            };
+            workspace.update(cx, |workspace, cx| {
+                super::CompactionSettingsModal::toggle(native_thread, workspace, window, cx);
+            });
+        }));
+
+        Some((compact_button, auto_compact_toggle))
+    }
+
+    fn get_thread_export_content(&self, cx: &App) -> (String, String) {
+        let acp_thread = self.thread.read(cx);
+        if let Some(native_thread) = self.as_native_thread(cx) {
+            let native = native_thread.read(cx);
+            let md = native.to_llm_context_markdown(cx);
+            let title = format!(
+                "{} — LLM Context",
+                acp_thread
+                    .title()
+                    .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into())
+            );
+            (md, title)
+        } else {
+            let md = acp_thread.to_markdown(cx);
+            let title = acp_thread
+                .title()
+                .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into())
+                .to_string();
+            (md, title)
+        }
+    }
+
     fn render_thread_controls(
         &self,
         thread: &Entity<AcpThread>,
@@ -4924,6 +5106,8 @@ impl ThreadView {
                         .detach_and_log_err(cx);
                 }
             }));
+
+        let compact_controls = self.render_compact_controls(cx);
 
         let scroll_to_recent_user_prompt =
             IconButton::new("scroll_to_recent_user_prompt", IconName::ForwardArrow)
@@ -5094,6 +5278,9 @@ impl ThreadView {
         }
 
         container
+            .when_some(compact_controls, |this, (compact_btn, toggle_btn)| {
+                this.child(compact_btn).child(toggle_btn)
+            })
             .child(open_as_markdown)
             .child(scroll_to_recent_user_prompt)
             .child(scroll_to_top)
@@ -5206,7 +5393,9 @@ impl ThreadView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.scroll_to_end(cx);
+        self.list_state.scroll_to_end();
+        self.list_state.set_follow_mode(gpui::FollowMode::Tail);
+        cx.notify();
     }
 
     fn scroll_output_to_previous_message(
@@ -5260,12 +5449,7 @@ impl ThreadView {
             .languages
             .language_for_name("Markdown");
 
-        let thread = self.thread.read(cx);
-        let thread_title = thread
-            .title()
-            .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into())
-            .to_string();
-        let markdown = thread.to_markdown(cx);
+        let (markdown, thread_title) = self.get_thread_export_content(cx);
 
         let project = workspace.read(cx).project().clone();
         window.spawn(cx, async move |cx| {
@@ -8955,10 +9139,48 @@ impl Render for ThreadView {
             })
             .map(|this| {
                 if has_messages {
+                    let is_at_bottom = self.list_state.is_following_tail();
+                    let is_generating = matches!(
+                        self.thread.read(cx).status(),
+                        acp_thread::ThreadStatus::Generating
+                    );
+                    if is_generating && is_at_bottom {
+                        self.list_state.scroll_to_end();
+                    }
                     this.flex_1()
                         .size_full()
+                        .relative()
                         .child(self.render_entries(cx))
                         .vertical_scrollbar_for(&list_state, window, cx)
+                        .when(!is_at_bottom, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .bottom_10()
+                                    .right_2()
+                                    .bg(cx.theme().colors().editor_background)
+                                    .border_1()
+                                    .border_color(cx.theme().colors().border)
+                                    .rounded_md()
+                                    .shadow(vec![gpui::BoxShadow {
+                                        color: gpui::black().opacity(0.12),
+                                        offset: point(px(0.), px(1.)),
+                                        blur_radius: px(3.),
+                                        spread_radius: px(0.),
+                                    }])
+                                    .child(
+                                        IconButton::new("scroll-to-bottom", IconName::ArrowDown)
+                                            .icon_size(IconSize::Small)
+                                            .shape(ui::IconButtonShape::Square)
+                                            .tooltip(Tooltip::text("Scroll to Bottom"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.list_state.scroll_to_end();
+                                                this.list_state.set_follow_mode(gpui::FollowMode::Tail);
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                        })
                         .into_any()
                 } else {
                     this.into_any()
