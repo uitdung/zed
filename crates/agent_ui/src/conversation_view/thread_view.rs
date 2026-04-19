@@ -3481,6 +3481,26 @@ impl ThreadView {
             .is_some_and(|model| model.supports_split_token_display())
     }
 
+    fn rules_directories_stats(&self, cx: &App) -> (usize, usize) {
+        self.as_native_thread(cx)
+            .map(|thread| {
+                let project_context = thread.read(cx).project_context().read(cx);
+                let files: usize = project_context
+                    .rules_directories
+                    .iter()
+                    .map(|dir| dir.files.len())
+                    .sum();
+                let chars: usize = project_context
+                    .rules_directories
+                    .iter()
+                    .flat_map(|dir| dir.files.iter())
+                    .map(|file| file.text.len())
+                    .sum();
+                (files, chars)
+            })
+            .unwrap_or_default()
+    }
+
     fn render_token_usage(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let thread = self.thread.read(cx);
         let usage = thread.token_usage()?;
@@ -3547,6 +3567,8 @@ impl ThreadView {
             })
             .unwrap_or_default();
 
+        let (rules_directories_count, rules_directories_chars) = self.rules_directories_stats(cx);
+
         let workspace = self.workspace.clone();
 
         let max_output_tokens = self
@@ -3585,6 +3607,8 @@ impl ThreadView {
                     first_user_rules_id,
                     project_rules_count,
                     project_entry_ids,
+                    rules_directories_count,
+                    rules_directories_chars,
                     workspace,
                 })
                 .into()
@@ -4366,6 +4390,8 @@ struct TokenUsageTooltip {
     first_user_rules_id: Option<uuid::Uuid>,
     project_rules_count: usize,
     project_entry_ids: Vec<ProjectEntryId>,
+    rules_directories_count: usize,
+    rules_directories_chars: usize,
     workspace: WeakEntity<Workspace>,
 }
 
@@ -4385,6 +4411,8 @@ impl Render for TokenUsageTooltip {
         let first_user_rules_id = self.first_user_rules_id;
         let project_rules_count = self.project_rules_count;
         let project_entry_ids = self.project_entry_ids.clone();
+        let rules_directories_count = self.rules_directories_count;
+        let rules_directories_chars = self.rules_directories_chars;
         let workspace = self.workspace.clone();
 
         ui::tooltip_container(cx, move |container, cx| {
@@ -4445,7 +4473,9 @@ impl Render for TokenUsageTooltip {
                     )
                 })
                 .when(
-                    user_rules_count > 0 || project_rules_count > 0,
+                    user_rules_count > 0
+                        || project_rules_count > 0
+                        || rules_directories_count > 0,
                     move |this| {
                         this.child(
                             v_flex()
@@ -4521,6 +4551,18 @@ impl Render for TokenUsageTooltip {
                                                             }
                                                         });
                                                 }),
+                                            )
+                                        })
+                                        .when(rules_directories_count > 0, move |this| {
+                                            this.child(
+                                                Button::new(
+                                                    "open-directory-rules",
+                                                    format!(
+                                                        "{} directory rules ({} chars)",
+                                                        rules_directories_count,
+                                                        rules_directories_chars
+                                                    ),
+                                                ),
                                             )
                                         }),
                                 ),
@@ -5109,6 +5151,21 @@ impl ThreadView {
 
         let compact_controls = self.render_compact_controls(cx);
 
+        let rule_directories_button = IconButton::new("rule-directories", IconName::Book)
+            .shape(ui::IconButtonShape::Square)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Ignored)
+            .tooltip(Tooltip::text("Rule Directories"))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let Some(workspace) = this.workspace.upgrade() else {
+                    return;
+                };
+                workspace.update(cx, |workspace, cx| {
+                    let project = workspace.project().clone();
+                    super::RulesDirectorySettingsModal::toggle(workspace, window, cx, project);
+                });
+            }));
+
         let scroll_to_recent_user_prompt =
             IconButton::new("scroll_to_recent_user_prompt", IconName::ForwardArrow)
                 .shape(ui::IconButtonShape::Square)
@@ -5281,6 +5338,7 @@ impl ThreadView {
             .when_some(compact_controls, |this, (compact_btn, toggle_btn)| {
                 this.child(compact_btn).child(toggle_btn)
             })
+            .child(rule_directories_button)
             .child(open_as_markdown)
             .child(scroll_to_recent_user_prompt)
             .child(scroll_to_top)

@@ -3,7 +3,9 @@ use collections::HashSet;
 use fs::{Fs, PathEventKind};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{App, BackgroundExecutor, ReadGlobal};
+use std::path::Path;
 use std::{path::PathBuf, sync::Arc, time::Duration};
+use util::ResultExt;
 
 #[cfg(test)]
 mod tests {
@@ -258,6 +260,41 @@ pub fn watch_config_dir(
         .detach();
 
     rx
+}
+
+pub async fn modify_project_settings_json(
+    fs: &Arc<dyn Fs>,
+    worktree_abs_path: &Path,
+    modify: impl FnOnce(&mut serde_json::Value) -> bool,
+) {
+    let settings_dir = worktree_abs_path.join(".zed");
+    let settings_path = settings_dir.join("settings.json");
+
+    let content = fs
+        .load(&settings_path)
+        .await
+        .unwrap_or_else(|_| "{}".to_string());
+
+    let mut json: serde_json::Value = match serde_json_lenient::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => {
+            return;
+        }
+    };
+
+    let changed = modify(&mut json);
+    if !changed {
+        return;
+    }
+
+    let new_text = match serde_json::to_string_pretty(&json) {
+        Ok(t) => t,
+        Err(_) => {
+            return;
+        }
+    };
+    fs.create_dir(&settings_dir).await.log_err();
+    fs.atomic_write(settings_path, new_text).await.log_err();
 }
 
 pub fn update_settings_file(

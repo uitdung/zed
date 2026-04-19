@@ -42,9 +42,10 @@ use project_panel_settings::ProjectPanelSettings;
 use rayon::slice::ParallelSliceMut;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use agent_settings::AgentSettings;
 use settings::{
-    DockSide, ProjectPanelEntrySpacing, Settings, SettingsStore, ShowDiagnostics, ShowIndentGuides,
-    update_settings_file,
+    DockSide, ProjectPanelEntrySpacing, Settings, SettingsLocation, SettingsStore,
+    ShowDiagnostics, ShowIndentGuides, modify_project_settings_json, update_settings_file,
 };
 use smallvec::SmallVec;
 use std::{
@@ -1039,6 +1040,7 @@ impl ProjectPanel {
             let worktree = worktree.read(cx);
             let is_root = Some(entry) == worktree.root_entry();
             let is_dir = entry.is_dir();
+            let is_rule_file = !is_dir && entry.path.extension().map_or(false, |ext| ["md", "txt", "mdc"].contains(&ext));
             let is_foldable = auto_fold_dirs && self.is_foldable(entry, worktree);
             let is_unfoldable = auto_fold_dirs && self.is_unfoldable(entry, worktree);
             let is_read_only = project.is_read_only(cx);
@@ -1163,11 +1165,16 @@ impl ProjectPanel {
                                     )
                                     .action("Remove from Project", Box::new(RemoveFromProject))
                             })
-                            .when(is_dir && !is_root, |menu| {
-                                menu.separator().action(
-                                    "Collapse All",
-                                    Box::new(CollapseSelectedEntryAndChildren),
-                                )
+                            .when((is_dir || is_rule_file) && !is_root, |menu| {
+                                let entries = self.rules_context_menu_entries(entry_id, &entity, cx);
+                                let menu = if !entries.is_empty() { menu.separator() } else { menu };
+                                let menu = entries.into_iter().fold(menu, |menu, entry| menu.item(entry));
+                                menu.when(is_dir, |menu| {
+                                    menu.action(
+                                        "Collapse All",
+                                        Box::new(CollapseSelectedEntryAndChildren),
+                                    )
+                                })
                             })
                             .when(is_dir && is_root, |menu| {
                                 let entity = entity.clone();
@@ -1194,6 +1201,132 @@ impl ProjectPanel {
         }
 
         cx.notify();
+    }
+
+    fn rules_context_menu_entries(
+        &self,
+        entry_id: ProjectEntryId,
+        entity: &Entity<Self>,
+        cx: &App,
+    ) -> Vec<ContextMenuEntry> {
+        let entry_project_path = self.project.read(cx).path_for_entry(entry_id, cx);
+        let is_in_rules = entry_project_path.as_ref().map_or(false, |project_path| {
+            let location = SettingsLocation {
+                worktree_id: project_path.worktree_id,
+                path: RelPath::empty(),
+            };
+            let path_str = project_path.path.as_unix_str().to_string();
+            AgentSettings::get(Some(location), cx)
+                .rules_directories
+                .iter()
+                .any(|d| d.path == path_str || path_str.starts_with(&format!("{}/", d.path)))
+        });
+
+        let entity = entity.clone();
+        if is_in_rules {
+            vec![ContextMenuEntry::new("Remove from Rules").handler(
+                move |_window, cx| {
+                    entity.update(cx, |this, cx| {
+                        let Some(project_path) = this
+                            .project
+                            .read(cx)
+                            .path_for_entry(entry_id, cx)
+                        else {
+                            return;
+                        };
+                        let path = project_path.path.as_unix_str().to_string();
+                        let fs = this.fs.clone();
+                        let worktree_id = project_path.worktree_id;
+                        let Some(worktree) =
+                            this.project.read(cx).worktree_for_id(worktree_id, cx)
+                        else {
+                            return;
+                        };
+                        let worktree_abs_path = worktree.read(cx).abs_path().to_path_buf();
+
+                        cx.spawn(async move |_this, _cx| {
+                            modify_project_settings_json(&fs, &worktree_abs_path, |json| {
+                                let Some(root) = json.as_object_mut() else { return false };
+                                let Some(dirs) = root
+                                    .get_mut("rules_directories")
+                                    .and_then(|d| d.as_array_mut())
+                                else {
+                                    return false;
+                                };
+
+                                let idx = dirs
+                                    .iter()
+                                    .position(|e| {
+                                        e.get("path")
+                                            .map_or(false, |p| p.as_str() == Some(&path))
+                                    })
+                                    .or_else(|| {
+                                        dirs.iter().position(|e| {
+                                            let dir =
+                                                e.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                                            !dir.is_empty()
+                                                && path.starts_with(&format!("{}/", dir))
+                                        })
+                                    });
+
+                                let Some(idx) = idx else { return false };
+                                dirs.remove(idx);
+                                if dirs.is_empty() {
+                                    root.remove("rules_directories");
+                                }
+                                true
+                            })
+                            .await;
+                        })
+                        .detach();
+                    });
+                },
+            )]
+        } else {
+            vec![ContextMenuEntry::new("Add to Rules").handler(
+                move |_window, cx| {
+                    entity.update(cx, |this, cx| {
+                        let Some(project_path) = this
+                            .project
+                            .read(cx)
+                            .path_for_entry(entry_id, cx)
+                        else {
+                            return;
+                        };
+                        let path = project_path.path.as_unix_str().to_string();
+                        let fs = this.fs.clone();
+                        let worktree_id = project_path.worktree_id;
+                        let Some(worktree) =
+                            this.project.read(cx).worktree_for_id(worktree_id, cx)
+                        else {
+                            return;
+                        };
+                        let worktree_abs_path = worktree.read(cx).abs_path().to_path_buf();
+
+                        cx.spawn(async move |_this, _cx| {
+                            modify_project_settings_json(&fs, &worktree_abs_path, |json| {
+                                let Some(root) = json.as_object_mut() else { return false };
+                                let dirs = root
+                                    .entry("rules_directories")
+                                    .or_insert_with(|| serde_json::json!([]));
+                                let Some(dirs_arr) = dirs.as_array_mut() else {
+                                    return false;
+                                };
+                                if dirs_arr.iter().any(|e| {
+                                    e.get("path").map_or(false, |p| p.as_str() == Some(&path))
+                                }) {
+                                    return false;
+                                }
+                                dirs_arr.push(serde_json::json!({"path": path, "enabled": true}));
+                                true
+                            })
+                            .await;
+                        })
+                        .detach();
+                    });
+                },
+            )]
+        }
     }
 
     fn has_git_changes(&self, entry_id: ProjectEntryId) -> bool {
@@ -7381,6 +7514,8 @@ fn git_status_indicator(git_status: GitSummary) -> Option<(&'static str, Color)>
     }
     None
 }
+
+
 
 #[cfg(test)]
 mod project_panel_tests;

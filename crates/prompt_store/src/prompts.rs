@@ -40,21 +40,26 @@ pub struct ProjectContext {
     pub user_rules: Vec<UserRulesContext>,
     /// `!user_rules.is_empty()` - provided as a field because handlebars can't do this.
     pub has_user_rules: bool,
+    pub rules_directories: Vec<RulesDirContext>,
+    pub has_rules_directories: bool,
     pub os: String,
     pub arch: String,
     pub shell: String,
 }
 
 impl ProjectContext {
-    pub fn new(worktrees: Vec<WorktreeContext>, default_user_rules: Vec<UserRulesContext>) -> Self {
+    pub fn new(worktrees: Vec<WorktreeContext>, default_user_rules: Vec<UserRulesContext>, rules_directories: Vec<RulesDirContext>) -> Self {
         let has_rules = worktrees
             .iter()
-            .any(|worktree| worktree.rules_file.is_some());
+            .any(|worktree| worktree.rules_file.is_some())
+            || !rules_directories.is_empty();
         Self {
             worktrees,
             has_rules,
             has_user_rules: !default_user_rules.is_empty(),
             user_rules: default_user_rules,
+            has_rules_directories: !rules_directories.is_empty(),
+            rules_directories,
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             shell: ShellKind::new(&get_default_system_shell_preferring_bash(), cfg!(windows))
@@ -85,6 +90,19 @@ pub struct RulesFileContext {
     // should be moved elsewhere.
     #[serde(skip)]
     pub project_entry_id: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct RulesDirContext {
+    pub worktree_root_name: String,
+    pub directory_path: String,
+    pub files: Vec<RulesDirFileContext>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct RulesDirFileContext {
+    pub path_in_worktree: Arc<RelPath>,
+    pub text: String,
 }
 
 #[derive(Serialize)]

@@ -5,6 +5,7 @@ mod legacy_thread;
 mod native_agent_server;
 pub mod outline;
 mod pattern_extraction;
+mod rules_scanner;
 mod templates;
 #[cfg(test)]
 mod tests;
@@ -45,10 +46,12 @@ use gpui::{
 };
 use language_model::{IconOrSvg, LanguageModel, LanguageModelProvider, LanguageModelRegistry};
 use project::{AgentId, Project, ProjectItem, ProjectPath, Worktree};
+use agent_settings::AgentSettings;
 use prompt_store::{
     ProjectContext, PromptStore, RULES_FILE_NAMES, RulesFileContext, UserRulesContext,
     WorktreeContext,
 };
+use settings::Settings;
 use serde::{Deserialize, Serialize};
 use settings::{LanguageModelSelection, Settings as _, update_settings_file};
 use std::any::Any;
@@ -287,6 +290,11 @@ impl NativeAgent {
             if let Some(prompt_store) = prompt_store.as_ref() {
                 subscriptions.push(cx.subscribe(prompt_store, Self::handle_prompts_updated_event))
             }
+            subscriptions.push(cx.observe_global::<SettingsStore>(|this, _cx| {
+                for state in this.projects.values_mut() {
+                    state.project_context_needs_refresh.send(()).ok();
+                }
+            }));
 
             Self {
                 sessions: HashMap::default(),
@@ -425,7 +433,7 @@ impl NativeAgent {
             return project_id;
         }
 
-        let project_context = cx.new(|_| ProjectContext::new(vec![], vec![]));
+        let project_context = cx.new(|_| ProjectContext::new(vec![], vec![], vec![]));
         self.register_project_with_initial_context(project.clone(), project_context, cx);
         if let Some(state) = self.projects.get_mut(&project_id) {
             state.project_context_needs_refresh.send(()).ok();
@@ -533,6 +541,7 @@ impl NativeAgent {
                 Self::load_worktree_info_for_system_prompt(worktree, project.clone(), cx)
             })
             .collect::<Vec<_>>();
+        let rules_directories_task = rules_scanner::scan_rules_directories(project, cx);
         let default_user_rules_task = if let Some(prompt_store) = prompt_store.as_ref() {
             prompt_store.read_with(cx, |prompt_store, cx| {
                 let prompts = prompt_store.default_prompt_metadata();
@@ -547,8 +556,11 @@ impl NativeAgent {
         };
 
         cx.spawn(async move |_cx| {
-            let (worktrees, default_user_rules) =
-                future::join(future::join_all(worktree_tasks), default_user_rules_task).await;
+            let ((worktrees, default_user_rules), rules_directories) =
+                future::join(
+                    future::join(future::join_all(worktree_tasks), default_user_rules_task),
+                    rules_directories_task,
+                ).await;
 
             let worktrees = worktrees
                 .into_iter()
@@ -582,7 +594,7 @@ impl NativeAgent {
                 })
                 .collect::<Vec<_>>();
 
-            ProjectContext::new(worktrees, default_user_rules)
+            ProjectContext::new(worktrees, default_user_rules, rules_directories)
         })
     }
 
@@ -715,7 +727,7 @@ impl NativeAgent {
         &mut self,
         project: Entity<Project>,
         event: &project::Event,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let project_id = project.entity_id();
         let Some(state) = self.projects.get_mut(&project_id) else {
@@ -725,12 +737,26 @@ impl NativeAgent {
             project::Event::WorktreeAdded(_) | project::Event::WorktreeRemoved(_) => {
                 state.project_context_needs_refresh.send(()).ok();
             }
-            project::Event::WorktreeUpdatedEntries(_, items) => {
-                if items.iter().any(|(path, _, _)| {
+            project::Event::WorktreeUpdatedEntries(worktree_id, items) => {
+                let location = settings::SettingsLocation {
+                    worktree_id: *worktree_id,
+                    path: RelPath::empty(),
+                };
+                let rules_dirs = &AgentSettings::get(Some(location), cx).rules_directories;
+
+                let should_refresh = items.iter().any(|(path, _, _)| {
                     RULES_FILE_NAMES
                         .iter()
                         .any(|name| path.as_ref() == RelPath::unix(name).unwrap())
-                }) {
+                        || (!rules_dirs.is_empty() && rules_dirs.iter()
+                            .filter(|entry| entry.enabled.unwrap_or(true))
+                            .any(|entry| {
+                                let path_str = path.as_unix_str();
+                                path_str == entry.path.as_str()
+                                    || path_str.starts_with(&format!("{}/", entry.path))
+                            }))
+                });
+                if should_refresh {
                     state.project_context_needs_refresh.send(()).ok();
                 }
             }

@@ -241,6 +241,9 @@ pub struct AgentSettingsContent {
     pub compaction: Option<CompactionSettingsContent>,
     /// Model selections for subagents based on capability level.
     pub subagent_models: Option<SubagentModelsContent>,
+    /// Rule directories to scan for .md/.txt files and include in agent context.
+    /// Paths are relative to worktree root.
+    pub rules_directories: Option<Vec<RulesDirectoryEntry>>,
 }
 
 impl AgentSettingsContent {
@@ -670,6 +673,14 @@ pub struct SubagentModelsContent {
     pub standard: Option<LanguageModelSelection>,
     /// Model for complex tasks (architecture, deep analysis).
     pub powerful: Option<LanguageModelSelection>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct RulesDirectoryEntry {
+    /// Path relative to worktree root (e.g. ".cursor/rules", "docs/conventions").
+    pub path: String,
+    /// Whether this directory is active. Default: true
+    pub enabled: Option<bool>,
 }
 
 #[with_fallible_options]

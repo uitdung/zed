@@ -103,9 +103,11 @@ const TOKEN_THRESHOLD: u64 = 250;
 
 mod compaction_settings_modal;
 mod compact_messages_modal;
+mod rules_directory_settings;
 mod thread_view;
 pub use compaction_settings_modal::*;
 pub use compact_messages_modal::*;
+pub use rules_directory_settings::*;
 pub use thread_view::*;
 
 pub struct QueuedMessage {

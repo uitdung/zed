@@ -177,6 +177,7 @@ pub struct AgentSettings {
     pub new_thread_location: NewThreadLocation,
     pub compaction: Option<settings::CompactionSettingsContent>,
     pub subagent_models: SubagentModels,
+    pub rules_directories: Vec<settings::RulesDirectoryEntry>,
 }
 
 impl AgentSettings {
@@ -689,6 +690,9 @@ impl Settings for AgentSettings {
                     standard: s.standard,
                     powerful: s.powerful,
                 })
+                .unwrap_or_default(),
+            rules_directories: content.project.rules_directories.clone()
+                .or(agent.rules_directories)
                 .unwrap_or_default(),
         }
     }

@@ -718,6 +718,7 @@ mod tests {
             thinking_display: Default::default(),
             compaction: None,
             subagent_models: Default::default(),
+            rules_directories: Default::default(),
         };
 
         cx.update(|cx| {

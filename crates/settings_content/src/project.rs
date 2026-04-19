@@ -14,7 +14,7 @@ use util::serde::default_true;
 
 use crate::{
     AllLanguageSettingsContent, DelayMs, ExtendingVec, ParseStatus, ProjectTerminalSettingsContent,
-    RootUserSettings, SaturatingBool, fallible_options,
+    RootUserSettings, RulesDirectoryEntry, SaturatingBool, fallible_options,
 };
 
 #[with_fallible_options]
@@ -85,6 +85,10 @@ pub struct ProjectSettingsContent {
     ///
     /// Default: false
     pub disable_ai: Option<SaturatingBool>,
+
+    /// Rule directories to scan for .md/.txt/.mdc files and include in agent context.
+    /// Paths are relative to worktree root.
+    pub rules_directories: Option<Vec<RulesDirectoryEntry>>,
 }
 
 #[with_fallible_options]

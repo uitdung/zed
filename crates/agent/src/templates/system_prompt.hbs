@@ -207,7 +207,7 @@ You are powered by the model named {{model_name}}.
 The following additional instructions are provided by the user, and should be followed to the best of your ability{{#if (gt (len available_tools) 0)}} without interfering with the tool use guidelines{{/if}}.
 
 {{#if has_rules}}
-There are project rules that apply to these root directories:
+These root directories have project rules — follow them for all work within this project:
 {{#each worktrees}}
 {{#if rules_file}}
 `{{root_name}}/{{rules_file.path_in_worktree}}`:
@@ -216,6 +216,16 @@ There are project rules that apply to these root directories:
 ``````
 {{/if}}
 {{/each}}
+{{#if has_rules_directories}}
+{{#each rules_directories}}
+{{#each files}}
+`{{../worktree_root_name}}/{{this.path_in_worktree}}`:
+``````
+{{{this.text}}}
+``````
+{{/each}}
+{{/each}}
+{{/if}}
 {{/if}}
 
 {{#if has_user_rules}}
