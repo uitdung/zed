@@ -3387,7 +3387,7 @@ impl Thread {
     /// Excludes the last 2 messages (typically the most recent exchange) to prevent
     /// compacting the active conversation.
     pub fn message_summaries_for_compaction(&self) -> Vec<MessageSummary> {
-        let keep = self.messages.len().saturating_sub(2).max(0);
+        let keep = self.messages.len().saturating_sub(2);
         self.messages[..keep].iter().enumerate().map(|(i, msg)| {
             let preview = match msg {
                 Message::User(user_msg) => {

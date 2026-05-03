@@ -53,7 +53,7 @@ use prompt_store::{
 };
 use settings::Settings;
 use serde::{Deserialize, Serialize};
-use settings::{LanguageModelSelection, Settings as _, update_settings_file};
+use settings::{LanguageModelSelection, SettingsStore, update_settings_file};
 use std::any::Any;
 use std::path::PathBuf;
 use std::rc::Rc;

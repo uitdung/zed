@@ -184,13 +184,15 @@ pub(crate) fn format_request_message_as_markdown(msg: &LanguageModelRequestMessa
                 if tool_result.is_error {
                     markdown.push_str("**ERROR:**\n");
                 }
-                match &tool_result.content {
-                    LanguageModelToolResultContent::Text(text) => {
-                        markdown.push_str(text);
-                        markdown.push_str("\n\n");
-                    }
-                    LanguageModelToolResultContent::Image(_) => {
-                        markdown.push_str("<image />\n\n");
+                for part in &tool_result.content {
+                    match part {
+                        LanguageModelToolResultContent::Text(text) => {
+                            markdown.push_str(text);
+                            markdown.push_str("\n\n");
+                        }
+                        LanguageModelToolResultContent::Image(_) => {
+                            markdown.push_str("<image />\n\n");
+                        }
                     }
                 }
             }
@@ -393,9 +395,7 @@ fn stripped_content_len(msg: &LanguageModelRequestMessage) -> usize {
             language_model::MessageContent::RedactedThinking(_) => {}
             language_model::MessageContent::ToolResult(tool_result) => {
                 if tool_result.is_error {
-                    if let Some(text) = tool_result.content.to_str() {
-                        len += text.len();
-                    }
+                    len += tool_result.text_contents().len();
                 }
             }
             language_model::MessageContent::ToolUse(_) | language_model::MessageContent::Image(_) => {}
