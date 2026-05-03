@@ -3721,13 +3721,12 @@ impl ThreadView {
             cx.theme().colors().text_muted
         };
 
-        let compactable_tokens = (debug_info.compactable_chars / 4) as u64;
-        let threshold_tokens = (debug_info.min_content_chars / 4) as u64;
-        let summary_threshold_tokens = (debug_info.summary_threshold_chars / 4) as u64;
-        let original_tokens = (debug_info.total_original_chars / 4) as u64;
-        let visible_tokens = (debug_info.total_visible_chars / 4) as u64;
-        let stripped_tokens = (debug_info.stripped_chars / 4) as u64;
-        let recent_tokens = (debug_info.recent_chars / 4) as u64;
+        let compactable_tokens = (debug_info.compactable_chars / 3) as u64;
+        let threshold_tokens = (debug_info.min_content_chars / 3) as u64;
+        let original_tokens = (debug_info.total_original_chars / 3) as u64;
+        let visible_tokens = (debug_info.total_visible_chars / 3) as u64;
+        let stripped_tokens = (debug_info.stripped_chars / 3) as u64;
+        let recent_tokens = (debug_info.recent_chars / 3) as u64;
 
         let label = format!(
             "{}/{}",
@@ -3735,44 +3734,32 @@ impl ThreadView {
             crate::humanize_token_count(threshold_tokens),
         );
 
+        let status = if debug_info.would_compact {
+            "will compact on next turn"
+        } else {
+            "below threshold"
+        };
+
         let tooltip_text = format!(
-            "Compaction Debug\n\
+            "Context Compaction\n\
             \n\
-            [TIMELINE: Old → New]\n\
-            [Tier 1: Tool Strip]\n\
-            All (before strip): ~{} tokens ({} chars)\n\
-            All (after strip / LLM-visible): ~{} tokens ({} chars)\n            Removed by strip: ~{} tokens ({} chars)\n\
-            Formula: after_strip = before_strip - removed_by_strip\n\
+            Tier 1 — Tool strip\n\
+            Total: ~{} → Visible: ~{} (stripped ~{})\n\
             \n\
-            [Tier 2: Summary]\n\
-            Old (eligible to summarize): ~{} tokens ({} chars)\n\
-            New (protected / kept): ~{} tokens ({} chars)\n\
-            Summary boundary (from new end): ~{} tokens from end ({} chars)\n\
-            Min old required to summarize: ~{} tokens ({} chars)\n\
-            Check: after_strip = old + new\n\
-            Trigger rule: will_compact = auto_compact && old >= min_old_required\n\
-            \n\
-            Messages: {} ({} request msgs)\n            Will compact: {}",
-            /* Tier 1 values (tokens humanized, then raw chars) */
+            Tier 2 — Summary\n\
+            Compactable: ~{} / ~{} threshold\n\
+            Protected:   ~{}\n\
+            Messages: {} ({} request msgs)\n\
+            Status: {}",
             crate::humanize_token_count(original_tokens),
-            debug_info.total_original_chars,
             crate::humanize_token_count(visible_tokens),
-            debug_info.total_visible_chars,
             crate::humanize_token_count(stripped_tokens),
-            debug_info.stripped_chars,
-            /* Tier 2 values */
             crate::humanize_token_count(compactable_tokens),
-            debug_info.compactable_chars,
-            crate::humanize_token_count(recent_tokens),
-            debug_info.recent_chars,
-            crate::humanize_token_count(summary_threshold_tokens),
-            debug_info.summary_threshold_chars,
             crate::humanize_token_count(threshold_tokens),
-            debug_info.min_content_chars,
-            /* messages / decision */
+            crate::humanize_token_count(recent_tokens),
             debug_info.message_count,
             debug_info.request_message_count,
-            debug_info.would_compact,
+            status,
         );
 
         let ring_size = px(16.0);

@@ -202,25 +202,25 @@ pub(crate) fn format_request_message_as_markdown(msg: &LanguageModelRequestMessa
 }
 
 /// Approximate characters per token, used for estimating token counts from char counts.
-pub(crate) const CHARS_PER_TOKEN: usize = 4;
+/// Set to 3 to align with the `bytes / 3` heuristic used in `zeta_prompt::estimate_tokens`.
+pub(crate) const CHARS_PER_TOKEN: usize = 3;
 
 /// Prompt prefix placed before the conversation content when requesting a summary.
 pub(crate) const COMPACT_PROMPT_PREFIX: &str = indoc::indoc! {"
-    ## Conversation to summarize
-
-    The following is an earlier portion of a conversation between a user and an AI coding assistant.
-    Tool outputs have been truncated or omitted, and thinking has been removed.
+    <conversation>
+    Below is an earlier portion of a conversation between a user and an AI coding assistant.
+    Each turn is labeled with [User] or [Assistant]. Tool outputs have been truncated or
+    omitted, and thinking has been removed.
 
 "};
 
 /// Prompt suffix placed after the conversation content, reinforcing the summarization instruction
 /// so the model does not mistake the last message as a prompt to respond to.
 pub(crate) const COMPACT_PROMPT_SUFFIX: &str = indoc::indoc! {"
+    </conversation>
 
-    ---
-
-    INSTRUCTION: Summarize the conversation above (excluding any Recent Context section).
-    Do NOT respond to it as an assistant.
+    <summary_instruction>
+    Summarize the conversation above. Do NOT respond to it as an assistant — produce a summary only.
 
     Focus on the **narrative flow** of the conversation — what was discussed, decided, and why.
     The summary will be used as context for continuing this conversation, so prioritize information
@@ -243,6 +243,7 @@ pub(crate) const COMPACT_PROMPT_SUFFIX: &str = indoc::indoc! {"
     re-examined from the codebase directly when needed.
 
     Target approximately 5000 tokens. Write in clear prose — not just bullet lists.
+    </summary_instruction>
 "};
 
 /// Configurable thresholds for compaction behavior.
@@ -299,19 +300,28 @@ fn build_compaction_request(
     messages: &[Message],
     model: &Arc<dyn LanguageModel>,
 ) -> Result<(usize, LanguageModelRequest)> {
-    let max_formatted_chars = (model.max_token_count() as usize * CHARS_PER_TOKEN)
-        .saturating_sub(
-            COMPACT_PROMPT_PREFIX.len()
-                + COMPACT_PROMPT_SUFFIX.len()
-                + 12_000,
-        );
+    let prompt_overhead_tokens = (COMPACT_PROMPT_PREFIX.len() + COMPACT_PROMPT_SUFFIX.len())
+        / CHARS_PER_TOKEN;
+    let output_reserve_tokens = 5_000;
+    let available_tokens = (model.max_token_count() as usize)
+        .saturating_sub(prompt_overhead_tokens)
+        .saturating_sub(output_reserve_tokens);
+    let max_formatted_chars = available_tokens * CHARS_PER_TOKEN;
 
     let mut formatted = String::new();
     for msg in messages {
         let entry = msg.to_markdown();
-        if !formatted.is_empty() && formatted.len() + entry.len() > max_formatted_chars {
+        let role_marker = match msg.role() {
+            Role::User => "\n[User]\n",
+            Role::Assistant => "\n[Assistant]\n",
+            Role::System => "\n[System]\n",
+        };
+        if !formatted.is_empty()
+            && formatted.len() + role_marker.len() + entry.len() > max_formatted_chars
+        {
             break;
         }
+        formatted.push_str(role_marker);
         formatted.push_str(&entry);
     }
 

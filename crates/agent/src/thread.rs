@@ -1973,6 +1973,21 @@ impl Thread {
         cx: &mut AsyncApp,
         turn_start_index: Option<usize>,
     ) -> Result<()> {
+        // Fast path: skip expensive char-based analysis when real API token
+        // usage is below the summary threshold.
+        let should_attempt = this
+            .read_with(cx, |this, _| {
+                let Some(usage) = this.latest_request_token_usage() else {
+                    return true;
+                };
+                usage.input_tokens >= this.compaction_config.summary_threshold_tokens
+            })
+            .unwrap_or(true);
+
+        if !should_attempt {
+            return Ok(());
+        }
+
         let plan = this.update(cx, |this, _cx| {
             let model = this.summarization_model.clone().or(this.model.clone());
             prepare_message_compaction(&this.messages, model, &this.compaction_config, turn_start_index)
