@@ -155,6 +155,10 @@ pub struct AgentSettingsContent {
     pub commit_message_model: Option<LanguageModelSelection>,
     /// Model to use for generating thread summaries. Defaults to default_model when not specified.
     pub thread_summary_model: Option<LanguageModelSelection>,
+    /// Configuration for the built-in vision tool that analyzes images using an
+    /// external vision API. When set, images pasted into chats with models that
+    /// don't support images will be analyzed via this tool.
+    pub vision_tool: Option<VisionToolContent>,
     /// Additional models with which to generate alternatives when performing inline assists.
     pub inline_alternatives: Option<Vec<LanguageModelSelection>>,
     /// The default profile to use in the Agent.
@@ -662,6 +666,21 @@ pub struct CompactionSettingsContent {
     ///
     /// Default: 60000
     pub min_content_chars: Option<usize>,
+}
+
+/// Configuration for the built-in vision tool.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct VisionToolContent {
+    /// API key for the vision service.
+    pub api_key: Option<String>,
+    /// Base URL for the vision API (OpenAI-compatible chat completions).
+    ///
+    /// Default: https://api.z.ai/api/coding/paas/v4/
+    pub api_url: Option<String>,
+    /// Vision model to use.
+    ///
+    /// Default: glm-4.6v
+    pub model: Option<String>,
 }
 
 /// Model selections for subagents based on capability level.

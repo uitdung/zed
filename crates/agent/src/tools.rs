@@ -22,6 +22,7 @@ mod terminal_tool;
 mod tool_edit_parser;
 mod tool_permissions;
 mod update_plan_tool;
+mod vision_tool;
 mod web_search_tool;
 
 use crate::AgentTool;
@@ -48,6 +49,7 @@ pub use streaming_edit_file_tool::*;
 pub use terminal_tool::*;
 pub use tool_permissions::*;
 pub use update_plan_tool::*;
+pub use vision_tool::*;
 pub use web_search_tool::*;
 
 macro_rules! tools {
@@ -137,5 +139,6 @@ tools! {
     SpawnAgentTool,
     TerminalTool,
     UpdatePlanTool,
+    VisionTool,
     WebSearchTool,
 }

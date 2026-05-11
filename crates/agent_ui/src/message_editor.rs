@@ -33,7 +33,7 @@ use project::{
 use prompt_store::PromptStore;
 use rope::Point;
 use settings::Settings;
-use std::{fmt::Write, ops::Range, rc::Rc, sync::Arc};
+use std::{fmt::Write, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
 use theme_settings::ThemeSettings;
 use ui::{ContextMenu, prelude::*};
 use util::paths::PathStyle;
@@ -250,7 +250,28 @@ fn insert_mention_for_project_path(
 
 enum ResolvedPastedContextItem {
     Image(gpui::Image, gpui::SharedString),
+    /// Image saved to a temp file because the model doesn't support images.
+    /// The LLM can use a vision tool to analyze the file at the given path.
+    ImageFileReference {
+        path: PathBuf,
+        name: SharedString,
+    },
     ProjectPath(ProjectPath),
+}
+
+/// For a given image, return either a direct Image item (when the model supports images)
+/// or an ImageFileReference (saved to temp file, for vision tools).
+fn resolve_image_item(
+    image: gpui::Image,
+    name: SharedString,
+    supports_images: bool,
+) -> Option<ResolvedPastedContextItem> {
+    if supports_images {
+        Some(ResolvedPastedContextItem::Image(image, name))
+    } else {
+        let path = save_image_to_temp_file(&image, &name)?;
+        Some(ResolvedPastedContextItem::ImageFileReference { path, name })
+    }
 }
 
 async fn resolve_pasted_context_items(
@@ -268,11 +289,12 @@ async fn resolve_pasted_context_items(
         match entry {
             ClipboardEntry::String(_) => {}
             ClipboardEntry::Image(image) => {
-                if supports_images {
-                    items.push(ResolvedPastedContextItem::Image(
-                        image,
-                        default_image_name.clone(),
-                    ));
+                if let Some(item) = resolve_image_item(
+                    image,
+                    default_image_name.clone(),
+                    supports_images,
+                ) {
+                    items.push(item);
                 }
             }
             ClipboardEntry::ExternalPaths(paths) => {
@@ -290,10 +312,10 @@ async fn resolve_pasted_context_items(
                         })
                         .await
                     {
-                        if supports_images {
-                            items.push(ResolvedPastedContextItem::Image(image, name));
-                        }
-                        continue;
+                    if let Some(item) = resolve_image_item(image, name, supports_images) {
+                        items.push(item);
+                    }
+                    continue;
                     }
 
                     if !project_is_local {
@@ -348,6 +370,28 @@ fn insert_project_path_as_context(
     .flatten()
 }
 
+/// Save a clipboard image to a temp file so vision tools can read it.
+fn save_image_to_temp_file(image: &gpui::Image, _name: &SharedString) -> Option<PathBuf> {
+    let id = uuid::Uuid::new_v4();
+    let ext = match image.format() {
+        gpui::ImageFormat::Png => "png",
+        gpui::ImageFormat::Jpeg => "jpg",
+        gpui::ImageFormat::Webp => "webp",
+        gpui::ImageFormat::Gif => "gif",
+        gpui::ImageFormat::Bmp => "bmp",
+        gpui::ImageFormat::Tiff => "tiff",
+        gpui::ImageFormat::Ico => "ico",
+        gpui::ImageFormat::Pnm => "pnm",
+        gpui::ImageFormat::Svg => "svg",
+    };
+    let file_name = format!("zed-image-{id}.{ext}");
+    let dir = std::env::temp_dir().join("zed-images");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(file_name);
+    std::fs::write(&path, image.bytes()).ok()?;
+    Some(path)
+}
+
 async fn insert_resolved_pasted_context_items(
     items: Vec<ResolvedPastedContextItem>,
     added_worktrees: Vec<Entity<Worktree>>,
@@ -367,6 +411,15 @@ async fn insert_resolved_pasted_context_items(
                     editor.clone(),
                     mention_set.clone(),
                     workspace.clone(),
+                    cx,
+                )
+                .await;
+            }
+            ResolvedPastedContextItem::ImageFileReference { path, name } => {
+                crate::mention_set::insert_image_file_reference(
+                    path,
+                    name,
+                    editor.clone(),
                     cx,
                 )
                 .await;
@@ -1223,9 +1276,6 @@ impl MessageEditor {
         let project = workspace.read(cx).project().clone();
         let project_is_local = project.read(cx).is_local();
         let supports_images = self.session_capabilities.read().supports_images();
-        if !project_is_local && !supports_images {
-            return false;
-        }
         let editor = self.editor.clone();
         let mention_set = self.mention_set.clone();
         let workspace = self.workspace.clone();
@@ -1412,9 +1462,7 @@ impl MessageEditor {
     }
 
     pub fn add_images_from_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.session_capabilities.read().supports_images() {
-            return;
-        }
+        let supports_images = self.session_capabilities.read().supports_images();
 
         let editor = self.editor.clone();
         let mention_set = self.mention_set.clone();
@@ -1449,11 +1497,18 @@ impl MessageEditor {
                     })
                     .await;
 
-                crate::mention_set::insert_images_as_context(
-                    images,
+                let items: Vec<ResolvedPastedContextItem> = images
+                    .into_iter()
+                    .filter_map(|(image, name)| resolve_image_item(image, name, supports_images))
+                    .collect();
+
+                insert_resolved_pasted_context_items(
+                    items,
+                    Vec::new(),
                     editor,
                     mention_set,
                     workspace,
+                    supports_images,
                     cx,
                 )
                 .await;

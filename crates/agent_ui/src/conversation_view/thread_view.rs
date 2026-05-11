@@ -4188,7 +4188,6 @@ impl ThreadView {
         let message_editor = self.message_editor.clone();
         let workspace = self.workspace.clone();
         let session_capabilities = self.session_capabilities.read();
-        let supports_images = session_capabilities.supports_images();
         let supports_embedded_context = session_capabilities.supports_embedded_context();
 
         let has_editor_selection = workspace
@@ -4279,7 +4278,6 @@ impl ThreadView {
                         .icon(IconName::Image)
                         .icon_color(Color::Muted)
                         .icon_size(IconSize::XSmall)
-                        .disabled(!supports_images)
                         .handler({
                             let message_editor = message_editor.clone();
                             move |window, cx| {

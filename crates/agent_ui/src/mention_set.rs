@@ -343,7 +343,15 @@ impl MentionSet {
 
         if is_raster_image_path(&abs_path) {
             if !supports_images {
-                return Task::ready(Err(anyhow!("This model does not support images yet")));
+                let display_path = abs_path.display().to_string();
+                let file_name = abs_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("image");
+                return Task::ready(Ok(Mention::Text {
+                    content: format!("[Image file: {file_name}]({display_path})"),
+                    tracked_buffers: Vec::new(),
+                }));
             }
             let task = project.update(cx, |project, cx| project.open_image(project_path, cx));
             return cx.spawn(async move |_, cx| {
@@ -887,6 +895,23 @@ pub(crate) fn load_external_image_from_path(
         .unwrap_or_else(|| default_name.clone());
 
     Some((Image::from_bytes(format, content), name))
+}
+
+/// Insert a text reference to an image file into the editor.
+/// Used when the model doesn't support images but MCP vision tools can read the file.
+pub(crate) async fn insert_image_file_reference(
+    path: PathBuf,
+    name: SharedString,
+    editor: Entity<Editor>,
+    cx: &mut gpui::AsyncWindowContext,
+) {
+    let display_path = path.display().to_string();
+    let reference_text = format!("[{name}]({display_path})");
+    editor
+        .update_in(cx, |editor, window, cx| {
+            editor.insert(&reference_text, window, cx);
+        })
+        .ok();
 }
 
 pub(crate) fn paste_images_as_context(
