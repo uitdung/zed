@@ -5858,10 +5858,11 @@ impl ThreadView {
                                 .border_l_1()
                                 .border_color(self.tool_card_border_color(cx))
                                 .when(is_constrained, |this| this.max_h_64())
+                                .when(!is_constrained, |this| this.max_h_96())
                                 .when_some(scroll_handle, |this, scroll_handle| {
                                     this.track_scroll(&scroll_handle)
                                 })
-                                .overflow_hidden()
+                                .overflow_y_scroll()
                                 .child(self.render_markdown(
                                     chunk,
                                     MarkdownStyle::themed(MarkdownFont::Agent, window, cx),

@@ -665,3 +665,50 @@ pub fn compute_compaction_debug_info(
         would_compact,
     }
 }
+
+/// When a single tool's text output exceeds this many characters, it will be truncated.
+pub(crate) const TOOL_OUTPUT_TRUNCATION_THRESHOLD_CHARS: usize = 50_000;
+/// Maximum number of characters to keep after truncating a tool's text output.
+pub(crate) const TOOL_OUTPUT_TRUNCATION_MAX_CHARS: usize = 10_000;
+
+/// Truncates tool output text content if it exceeds the configured threshold.
+/// Non-text content (images) is left untouched.
+pub(crate) fn truncate_tool_output(
+    mut content: Vec<LanguageModelToolResultContent>,
+) -> Vec<LanguageModelToolResultContent> {
+    let total_text_chars: usize = content
+        .iter()
+        .map(|part| match part {
+            LanguageModelToolResultContent::Text(text) => text.len(),
+            LanguageModelToolResultContent::Image(_) => 0,
+        })
+        .sum();
+
+    if total_text_chars <= TOOL_OUTPUT_TRUNCATION_THRESHOLD_CHARS {
+        return content;
+    }
+
+    let mut remaining = TOOL_OUTPUT_TRUNCATION_MAX_CHARS;
+    let omit_suffix = "\n\n... omitted ...\n";
+    let suffix_len = omit_suffix.len();
+    remaining = remaining.saturating_sub(suffix_len);
+
+    for part in &mut content {
+        if let LanguageModelToolResultContent::Text(text) = part {
+            if text.len() <= remaining {
+                remaining -= text.len();
+            } else {
+                let mut end = remaining;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let truncated: Arc<str> = Arc::from(&text[..end]);
+                *text = truncated;
+                remaining = 0;
+            }
+        }
+    }
+
+    content.push(LanguageModelToolResultContent::Text(Arc::from(omit_suffix)));
+    content
+}

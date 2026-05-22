@@ -1,6 +1,7 @@
 use crate::context_compaction::{
     apply_message_compaction, compact_old_tool_results, format_request_message_as_markdown,
-    prepare_message_compaction, stream_compaction_summary, CHARS_PER_TOKEN,
+    prepare_message_compaction, stream_compaction_summary, truncate_tool_output,
+    CHARS_PER_TOKEN,
 };
 use crate::{
     ContextServerRegistry, CopyPathTool, CreateDirectoryTool, DbLanguageModel, DbThread,
@@ -2635,11 +2636,13 @@ impl Thread {
                 Err(output) => (true, output),
             };
 
+            let content = truncate_tool_output(output.llm_output);
+
             LanguageModelToolResult {
                 tool_use_id,
                 tool_name,
                 is_error,
-                content: output.llm_output,
+                content,
                 output: Some(output.raw_output),
             }
         })
