@@ -5849,6 +5849,7 @@ impl ThreadView {
             .when(is_open, |this| {
                 this.child(
                     div()
+                        .overflow_hidden()
                         .when(is_constrained, |this| this.relative())
                         .child(
                             div()
